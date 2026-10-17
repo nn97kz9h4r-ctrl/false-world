@@ -8,10 +8,8 @@ import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundSoundPacket;
-import net.minecraft.core.Holder;
-import net.minecraft.sounds.SoundEvent;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.protocol.game.ClientboundCustomSoundPacket;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.level.Level;
@@ -62,7 +60,7 @@ public final class FalseWorld implements ModInitializer {
     private static int scareEntityId = -1;
     private static long scareExpiry = 0;
     private static final ResourceKey<Level> FALSE_DIMENSION = ResourceKey.create(
-        Registries.DIMENSION, Identifier.parse("falseworld:false_world"));
+        Registries.DIMENSION, ResourceLocation.parse("falseworld:false_world"));
     private static final Map<UUID, Vec3> returnLocations = new HashMap<>();
     private static final Map<UUID, Float> returnYaw = new HashMap<>();
     private static final Map<UUID, Float> returnPitch = new HashMap<>();
@@ -87,6 +85,8 @@ public final class FalseWorld implements ModInitializer {
     private static long nextGhostRefresh;
     // All corruption is client-only; the real world's blocks are never modified.
     private static final Map<BlockPos, BlockState> corruptedBlocks = new HashMap<>();
+    private static final Set<Long> generatedNightmareSites = new HashSet<>();
+    private static final int FALSE_GROUND_Y = 64;
     private static long nextEchoTick;
     private static long nextNpcDialogueTick;
     private static final String[] NPC_LINES = {
@@ -129,7 +129,7 @@ public final class FalseWorld implements ModInitializer {
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTED.register(FalseWorld::loadConfigAndState);
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STOPPING.register(FalseWorld::saveState);
         CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
-            dispatcher.register(Commands.literal("falseworld").requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+            dispatcher.register(Commands.literal("falseworld").requires(s -> s.hasPermission(2))
                 .then(Commands.literal("dimension").then(Commands.literal("test").executes(c -> {
                     ServerPlayer p = getVictim(c.getSource().getServer());
                     if (p == null) { c.getSource().sendFailure(Component.literal("Select an online victim first: /falseworld target <name>")); return 0; }
@@ -430,10 +430,9 @@ public final class FalseWorld implements ModInitializer {
         double y = p.getY() + RNG.nextInt(5) - 2;
         double z = p.getZ() + Math.sin(angle) * distance;
         String soundId = SOUND_IDS[RNG.nextInt(SOUND_IDS.length)];
-        p.connection.send(new ClientboundSoundPacket(
-            Holder.direct(SoundEvent.createVariableRangeEvent(Identifier.parse(soundId))),
-            SoundSource.AMBIENT,
-            x, y, z,
+        p.connection.send(new ClientboundCustomSoundPacket(
+            ResourceLocation.parse(soundId), SoundSource.AMBIENT,
+            new Vec3(x, y, z),
             0.65f + RNG.nextFloat() * 0.35f,
             0.75f + RNG.nextFloat() * 0.35f,
             RNG.nextLong()
@@ -525,11 +524,49 @@ public final class FalseWorld implements ModInitializer {
         LOG.info("echo_attempt player=" + p.getUUID() + " identity=" + copy.getUUID());
     }
 
+    /** Physical scenery is written ONLY to the dedicated False World level. */
+    private static void generateNightmareSite(ServerLevel world, BlockPos center) {
+        if (!world.dimension().equals(FALSE_DIMENSION)) return;
+        int siteX = Math.floorDiv(center.getX(), 128);
+        int siteZ = Math.floorDiv(center.getZ(), 128);
+        long key = (((long) siteX) << 32) ^ (siteZ & 0xffffffffL);
+        if (!generatedNightmareSites.add(key)) return;
+        Random random = new Random(key ^ 0x5F00D123L);
+        int originX = siteX * 128 + 64;
+        int originZ = siteZ * 128 + 64;
+        // Leafless skeletal trees: sparse trunks and crooked branches.
+        for (int i = 0; i < 24; i++) {
+            int x = originX + random.nextInt(108) - 54;
+            int z = originZ + random.nextInt(108) - 54;
+            int h = 4 + random.nextInt(5);
+            for (int y = 0; y < h; y++) world.setBlock(new BlockPos(x, FALSE_GROUND_Y + y, z), Blocks.DARK_OAK_LOG.defaultBlockState(), 3);
+            int direction = random.nextBoolean() ? 1 : -1;
+            for (int a = 1; a <= 2; a++) world.setBlock(new BlockPos(x + a * direction, FALSE_GROUND_Y + h - 2, z), Blocks.DARK_OAK_LOG.defaultBlockState(), 3);
+        }
+        // A hollow ruined chapel, with broken roof and doorways.
+        int bx = originX + 15, bz = originZ + 10;
+        for (int dx = -6; dx <= 6; dx++) for (int dz = -8; dz <= 8; dz++) {
+            world.setBlock(new BlockPos(bx + dx, FALSE_GROUND_Y - 1, bz + dz), Blocks.CRACKED_STONE_BRICKS.defaultBlockState(), 3);
+            for (int dy = 0; dy <= 6; dy++) {
+                boolean edge = Math.abs(dx) == 6 || Math.abs(dz) == 8;
+                boolean doorway = dz == -8 && Math.abs(dx) <= 1 && dy < 4;
+                boolean broken = random.nextInt(9) == 0;
+                if (edge && !doorway && !broken) world.setBlock(new BlockPos(bx + dx, FALSE_GROUND_Y + dy, bz + dz),
+                    (random.nextInt(4) == 0 ? Blocks.MOSSY_STONE_BRICKS : Blocks.CRACKED_STONE_BRICKS).defaultBlockState(), 3);
+            }
+        }
+        for (int i = 0; i < 12; i++) {
+            int x = bx + random.nextInt(11) - 5, z = bz + random.nextInt(15) - 7;
+            world.setBlock(new BlockPos(x, FALSE_GROUND_Y, z), Blocks.COBWEB.defaultBlockState(), 3);
+        }
+        LOG.info("Generated nightmare site " + siteX + "," + siteZ);
+    }
+
     private static void startFalseSession(ServerPlayer p, boolean forced) {
         if (!falseWorldEnabled || OPT_OUT.contains(p.getUUID())) return;
         if (FALSE_SESSIONS.containsKey(p.getUUID())) return;
         int duration = falseWorldMinSeconds + RNG.nextInt(falseWorldMaxSeconds - falseWorldMinSeconds + 1);
-        ServerLevel target = p.level().getServer().getLevel(FALSE_DIMENSION);
+        ServerLevel target = p.getServer().getLevel(FALSE_DIMENSION);
         if (target == null) {
             p.sendSystemMessage(Component.literal("§cFalse World dimension missing. Check the bundled dimension JSON."));
             LOG.warning("Cannot start False World: dimension falseworld:false_world not registered");
@@ -539,10 +576,12 @@ public final class FalseWorld implements ModInitializer {
         returnYaw.put(p.getUUID(), p.getYRot());
         returnPitch.put(p.getUUID(), p.getXRot());
         ResourceKey<Level> origin = p.level().dimension();
-        // First implementation: dimension terrain uses the same seed and noise settings.
-        // Player-built bases require a separate safe, bounded chunk-copy pipeline.
+        // Flat dimension's surface is near Y=64; use a safe arrival above it.
+        // Player-built bases still require a separate chunk-copy pipeline.
         blackout(p);
-        if (!p.teleportTo(target, p.getX(), p.getY(), p.getZ(),
+        BlockPos arrival = new BlockPos((int) Math.floor(p.getX()), FALSE_GROUND_Y + 2, (int) Math.floor(p.getZ()));
+        generateNightmareSite(target, arrival);
+        if (!p.teleportTo(target, p.getX(), FALSE_GROUND_Y + 2, p.getZ(),
                 java.util.Set.of(), p.getYRot(), p.getXRot(), true)) {
             returnLocations.remove(p.getUUID()); returnYaw.remove(p.getUUID()); returnPitch.remove(p.getUUID());
             LOG.warning("False World teleport failed for " + p.getUUID());
@@ -576,12 +615,13 @@ public final class FalseWorld implements ModInitializer {
             nextNpcDialogueTick = tick + 20L * (18 + RNG.nextInt(32));
         }
         if (tick >= nextEchoTick) {
-            echoAppearance(p.level().getServer(), p);
+            echoAppearance(p.getServer(), p);
             nextEchoTick = tick + 20L * (22 + RNG.nextInt(38));
         }
         if (tick >= session.nextCorruptionTick) {
             // Private visual corruption; no block writes, no effects on other players.
             p.connection.send(new ClientboundSetTimePacket(18000L, 18000L, false));
+            generateNightmareSite((ServerLevel) p.level(), p.blockPosition());
             createIllusion(p);
             if (RNG.nextInt(3) == 0) playPrivateHorrorSound(p, true);
             if (RNG.nextInt(5) == 0) blackout(p);
@@ -597,9 +637,13 @@ public final class FalseWorld implements ModInitializer {
         illusions.clear();
         clearCorruption(p);
         clearScare(p);
-        ServerLevel original = p.level().getServer().getLevel(session.originDimension);
-        Vec3 destination = p.position(); // preserve where the victim walked in the false world
+        ServerLevel original = p.getServer().getLevel(session.originDimension);
+        Vec3 destination = p.position(); // preserve X/Z, find safe Y in real world
         if (original != null && p.level().dimension().equals(FALSE_DIMENSION)) {
+            // Flat terrain has a different elevation; choose the real world's surface.
+            BlockPos surface = original.getHeightmapPos(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                BlockPos.containing(destination));
+            destination = new Vec3(destination.x, surface.getY(), destination.z);
             // Validate safe landing: avoid returning into solid blocks.
             BlockPos feet = BlockPos.containing(destination);
             if (!original.getBlockState(feet).getCollisionShape(original, feet).isEmpty()
@@ -618,8 +662,8 @@ public final class FalseWorld implements ModInitializer {
         // these effects, a future implementation should track ownership first.
         p.removeEffect(MobEffects.BLINDNESS);
         p.removeEffect(MobEffects.DARKNESS);
-        // Resync the real world time/weather/border to the player.
-        p.level().getServer().getPlayerList().sendLevelInfo(p, (ServerLevel) p.level());
+        p.connection.send(new ClientboundSetTimePacket(p.level().getGameTime(),
+            p.level().getDayTime(), p.level().getGameRules().getBoolean(net.minecraft.world.level.GameRules.RULE_DAYLIGHT)));
         p.sendSystemMessage(Component.literal("§7§oThe false world releases you."));
         LOG.info("false_world_return player=" + p.getUUID() + " position=" + p.blockPosition());
     }

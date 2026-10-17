@@ -1,34 +1,22 @@
-# The False World v0.14 — separate dimension experiment
+# The False World v0.15 — Flat corrupted dimension prototype
 
-**SOURCE ONLY. UNCOMPILED AND UNTESTED. DO NOT INSTALL AS A JAR.**
+**SOURCE ONLY. NOT COMPILED OR TESTED.** This is not a usable server JAR.
 
-## Changes
-- Bundled `data/falseworld/dimension/false_world.json` registers a separate
-  dimension with Overworld-style noise terrain and the same world seed.
-- `dimension test` now attempts to teleport the selected victim into that
-  dimension; after 60–300 seconds, `dimension return` sends them back to their
-  current X/Y/Z in the original world, falling back to the entry location when
-  the corresponding destination is obstructed.
-- Private fake creeper and primed-TNT entity packets, auto-removed after ~1 sec.
-  **They never explode, damage terrain or become real server entities.**
-- Commands `/falseworld creepertest`, `/falseworld tnttest`, `/falseworld scareclear`.
-- Random scare events during the False World session.
-- Existing private block corruption, darkness, NPC text and sound systems retained.
+Changes from uploaded v0.14:
+- Replaced ordinary noise Overworld generation with a flat dimension definition.
+- Physical leafless skeletal trees, a hollow ruined chapel, and cobwebs placed in the
+  dedicated False World (not the original Overworld).
+- Generated sites repeat in 128x128 regions as players explore.
+- Entry moves players to the flat world's surface; return attempts to find the real
+  world's surface at their final X/Z instead of returning at flat-world Y.
+- Existing fake-player Echo and creepy dialogue hooks remain in source.
 
-## Important gaps / risks
-- **This dimension generates fresh terrain. It does NOT copy player-built bases.**
-  Copying chunks and block entities safely is a major separate subsystem.
-- The dimension is not instance-isolated: multiple victims share the same
-  false dimension, and normal mobs may still spawn.
-- Minecraft 1.21.11 teleport and entity packet APIs must be checked against
-  real mappings; no compilation or runtime validation has been performed.
-- Vanilla server-side blindness/darkness cannot guarantee an entirely black
-  screen; custom full-screen visual overlays require client support.
-- The Creeper does not visibly enter its swelling animation yet; the illusion
-  is a sudden close-up sighting, then disappearance.
-- The false world does not yet have physical ruins or Echo Player recordings.
-- A server crash during an encounter needs recovery logic to avoid stranding.
+**Not implemented:** actual copying of the player's base, NPC walking AI,
+true dense fog, terrain streaming, structure persistence bookkeeping across
+server restarts, complete safety/return handling. Generated sites are tracked
+in memory only and may be rewritten after restart. The world generator's
+exact 1.21.11 JSON and Java APIs need compilation and in-game validation.
 
-**Testing order after successful compilation:** backup your world, target an
-operator test account, run `/falseworld dimension test`, then `/falseworld
-creepertest` and `/falseworld tnttest`, then `/falseworld dimension return`.
+**Important:** Minecraft saves generated dimension chunks. For existing test
+worlds, changing the dimension JSON will NOT flatten previously generated
+chunks. Test on a new disposable world/server backup.

@@ -1,4 +1,5 @@
-# v0.14
-- Experimental real dimension definition and teleportation.
-- Private vanishing creeper/TNT packet jump scares and commands.
-- Not yet a copied world; source unverified.
+# v0.15
+- Flat worldgen configuration for falseworld:false_world
+- Physical leafless trees and ruined chapel in false dimension
+- Arrival/return elevation adjustment
+- Not compiled or tested
