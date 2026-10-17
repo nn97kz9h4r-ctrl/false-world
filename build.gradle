@@ -1,0 +1,14 @@
+plugins { id 'fabric-loom' version '1.13-SNAPSHOT' }
+version = '0.10.0'
+group = 'com.falseworld'
+base { archivesName = 'false-world' }
+repositories { mavenCentral(); maven { url = 'https://maven.fabricmc.net/' } }
+dependencies {
+ minecraft 'com.mojang:minecraft:1.21.11'
+ mappings loom.officialMojangMappings()
+ modImplementation 'net.fabricmc:fabric-loader:0.18.4'
+ modImplementation 'net.fabricmc.fabric-api:fabric-api:0.141.1+1.21.11'
+}
+processResources { inputs.property 'version', project.version; filesMatching('fabric.mod.json') { expand version: project.version } }
+tasks.withType(JavaCompile).configureEach { options.release = 21 }
+java { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
