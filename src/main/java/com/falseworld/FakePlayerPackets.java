@@ -15,8 +15,6 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.world.phys.Vec3;
 import java.util.List;
-import java.util.Set;
-import net.minecraft.world.entity.PositionMoveRotation;
 import java.util.UUID;
 
 /**
@@ -56,7 +54,7 @@ public final class FakePlayerPackets {
                 profile.properties().put("textures", new Property("textures", skin,
                     skinSignature == null || skinSignature.isEmpty() ? null : skinSignature));
             }
-            MinecraftServer server = ((ServerLevel) viewer.level()).getServer();
+            MinecraftServer server = viewer.getServer();
             actor = new ServerPlayer(server, (ServerLevel) viewer.level(), profile,
                 ClientInformation.createDefault());
             entityId = actor.getId();
@@ -68,7 +66,7 @@ public final class FakePlayerPackets {
             actor.setPos(pos.x, pos.y, pos.z);
             actor.setYRot(yaw);
             actor.setYHeadRot(yaw);
-            viewer.connection.send(new ClientboundTeleportEntityPacket(entityId, PositionMoveRotation.of(actor), Set.of(), actor.onGround()));
+            viewer.connection.send(new ClientboundTeleportEntityPacket(actor));
             shownAt = pos;
             return;
         }

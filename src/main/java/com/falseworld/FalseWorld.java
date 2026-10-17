@@ -8,10 +8,15 @@ import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundSoundPacket;
-import net.minecraft.core.Holder;
-import net.minecraft.sounds.SoundEvent;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.protocol.game.ClientboundCustomSoundPacket;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.entity.item.PrimedTnt;
+import net.minecraft.world.level.block.Blocks;
+
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.server.MinecraftServer;
@@ -52,6 +57,14 @@ public final class FalseWorld implements ModInitializer {
     private static long lastPersistenceTick;
     private static final Logger LOG = Logger.getLogger("FalseWorld");
     private static int mobEntityId = -1;
+    private static int scareEntityId = -1;
+    private static long scareExpiry = 0;
+    private static final ResourceKey<Level> FALSE_DIMENSION = ResourceKey.create(
+        Registries.DIMENSION, ResourceLocation.parse("falseworld:false_world"));
+    private static final Map<UUID, Vec3> returnLocations = new HashMap<>();
+    private static final Map<UUID, Float> returnYaw = new HashMap<>();
+    private static final Map<UUID, Float> returnPitch = new HashMap<>();
+    private static final Map<UUID, Long> nextJumpScare = new HashMap<>();
     private static long mobExpiry;
     private static int damageCap = 2;
     private static boolean allowDamage = false;
@@ -70,6 +83,16 @@ public final class FalseWorld implements ModInitializer {
     private record FalseSession(UUID playerId, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> originDimension,
                                 long endTick, long nextCorruptionTick, long startedTick) {}
     private static long nextGhostRefresh;
+    // All corruption is client-only; the real world's blocks are never modified.
+    private static final Map<BlockPos, BlockState> corruptedBlocks = new HashMap<>();
+    private static long nextEchoTick;
+    private static long nextNpcDialogueTick;
+    private static final String[] NPC_LINES = {
+        "You left this place years ago.", "That isn't your house anymore.",
+        "Don't follow the ones who look familiar.", "The trees remember.",
+        "We can hear you in the other world.", "There was never a way out."
+    };
+
     private static UUID previousViewer;
     private static UUID victim, stolenIdentity;
     private static UUID lastStolenIdentity;
@@ -104,7 +127,7 @@ public final class FalseWorld implements ModInitializer {
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTED.register(FalseWorld::loadConfigAndState);
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STOPPING.register(FalseWorld::saveState);
         CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
-            dispatcher.register(Commands.literal("falseworld").requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+            dispatcher.register(Commands.literal("falseworld").requires(s -> s.hasPermission(2))
                 .then(Commands.literal("dimension").then(Commands.literal("test").executes(c -> {
                     ServerPlayer p = getVictim(c.getSource().getServer());
                     if (p == null) { c.getSource().sendFailure(Component.literal("Select an online victim first: /falseworld target <name>")); return 0; }
@@ -124,6 +147,44 @@ public final class FalseWorld implements ModInitializer {
                         "False-world session: " + Math.max(0, (session.endTick - tick) / 20) + " seconds left"), false);
                     return 1;
                 })))
+                .then(Commands.literal("dimension").then(Commands.literal("corrupttest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    corruptSurroundings(p, true);
+                    c.getSource().sendSuccess(() -> Component.literal("Private corrupted scenery sent to victim"), false);
+                    return 1;
+                })).then(Commands.literal("npctest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    npcDialogue(p);
+                    return 1;
+                })).then(Commands.literal("echotest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    echoAppearance(c.getSource().getServer(), p);
+                    return 1;
+                })).then(Commands.literal("cleartest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    clearCorruption(p);
+                    GHOST.hide(p);
+                    return 1;
+                })))
+                .then(Commands.literal("creepertest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    spawnScare(p, false); return 1;
+                }))
+                .then(Commands.literal("tnttest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    spawnScare(p, true); return 1;
+                }))
+                .then(Commands.literal("scareclear").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    clearScare(p); return 1;
+                }))
                 .then(Commands.literal("blackouttest").executes(c -> {
                     ServerPlayer p = getVictim(c.getSource().getServer());
                     if (p == null) return 0;
@@ -247,7 +308,7 @@ public final class FalseWorld implements ModInitializer {
     }
     private static void reset(MinecraftServer server) {
         ServerPlayer p = getVictim(server);
-        if (p != null) { endFalseSession(p); restore(p); }
+        if (p != null) { endFalseSession(p); restore(p); clearCorruption(p); clearScare(p); }
         GHOST.hide(p);
         if (p != null) { p.removeEffect(MobEffects.BLINDNESS); p.removeEffect(MobEffects.DARKNESS); clearMob(p); }
         MIMIC.reset(); forcedPhase = -1; nextGhostRefresh = 0; illusions.clear(); identitySnapshots.clear(); lastStolenIdentity = null; victim = null; stolenIdentity = null; events = 0; lastSoundTick = -SOUND_COOLDOWN_TICKS;
@@ -267,6 +328,7 @@ public final class FalseWorld implements ModInitializer {
         if (persistedVictim != null && victim == null) { victim = persistedVictim; persistedVictim = null; }
         if (tick - lastPersistenceTick > 1200) { saveState(server); lastPersistenceTick = tick; }
         if (p != null && mobEntityId >= 0 && tick >= mobExpiry) clearMob(p);
+        if (p != null && scareEntityId >= 0 && tick >= scareExpiry) clearScare(p);
         if (p == null && GHOST.visible()) { GHOST.hide(null); MIMIC.reset(); }
         if (p != null && MIMIC.active() && stolenIdentity != null && tick >= nextGhostRefresh) {
             IdentitySnapshot snap = identitySnapshots.get(stolenIdentity);
@@ -366,10 +428,9 @@ public final class FalseWorld implements ModInitializer {
         double y = p.getY() + RNG.nextInt(5) - 2;
         double z = p.getZ() + Math.sin(angle) * distance;
         String soundId = SOUND_IDS[RNG.nextInt(SOUND_IDS.length)];
-        p.connection.send(new ClientboundSoundPacket(
-            Holder.direct(SoundEvent.createVariableRangeEvent(Identifier.parse(soundId))),
-            SoundSource.AMBIENT,
-            x, y, z,
+        p.connection.send(new ClientboundCustomSoundPacket(
+            ResourceLocation.parse(soundId), SoundSource.AMBIENT,
+            new Vec3(x, y, z),
             0.65f + RNG.nextFloat() * 0.35f,
             0.75f + RNG.nextFloat() * 0.35f,
             RNG.nextLong()
@@ -398,14 +459,99 @@ public final class FalseWorld implements ModInitializer {
      * walking in the real world. Exact-position return is automatic because no
      * teleport happens. This is NOT a separately registered Minecraft dimension.
      */
+    /** Packet-only corruption. Air replaces leaves and selected lights; stone and
+     * moss stand in for decayed walls. Real blocks are unchanged and collisions remain
+     * real, so this is visual theatre, not an independent dimension. */
+    private static void corruptSurroundings(ServerPlayer p, boolean includeStructure) {
+        BlockPos center = p.blockPosition();
+        for (int i = 0; i < 150 && corruptedBlocks.size() < 280; i++) {
+            BlockPos pos = center.offset(RNG.nextInt(33)-16, RNG.nextInt(17)-7, RNG.nextInt(33)-16);
+            if (!p.level().isLoaded(pos) || corruptedBlocks.containsKey(pos)) continue;
+            BlockState actual = p.level().getBlockState(pos);
+            BlockState replacement = null;
+            if (actual.is(net.minecraft.tags.BlockTags.LEAVES)) replacement = Blocks.AIR.defaultBlockState();
+            else if (actual.is(Blocks.TORCH) || actual.is(Blocks.WALL_TORCH)
+                    || actual.is(Blocks.LANTERN) || actual.is(Blocks.SOUL_LANTERN)) replacement = Blocks.AIR.defaultBlockState();
+            else if (actual.is(Blocks.OAK_PLANKS) || actual.is(Blocks.SPRUCE_PLANKS))
+                replacement = RNG.nextBoolean() ? Blocks.MOSSY_COBBLESTONE.defaultBlockState() : Blocks.CRACKED_STONE_BRICKS.defaultBlockState();
+            if (replacement == null) continue;
+            corruptedBlocks.put(pos.immutable(), actual);
+            p.connection.send(new ClientboundBlockUpdatePacket(pos, replacement));
+        }
+        if (includeStructure) {
+            // Small packet-only ruin: low, roofless stone perimeter near victim.
+            // This does not create an NPC with collision or a real structure.
+            BlockPos base = center.offset(8, 0, 8);
+            for (int dx = -3; dx <= 3; dx++) for (int dz = -3; dz <= 3; dz++) {
+                boolean edge = Math.abs(dx) == 3 || Math.abs(dz) == 3;
+                if (!edge || (Math.abs(dx) < 2 && dz == -3)) continue;
+                int height = 1 + RNG.nextInt(3);
+                for (int dy = 0; dy < height; dy++) {
+                    BlockPos pos = base.offset(dx, dy, dz);
+                    if (!p.level().isLoaded(pos) || corruptedBlocks.containsKey(pos)) continue;
+                    corruptedBlocks.put(pos.immutable(), p.level().getBlockState(pos));
+                    p.connection.send(new ClientboundBlockUpdatePacket(pos,
+                        RNG.nextBoolean() ? Blocks.MOSSY_STONE_BRICKS.defaultBlockState() : Blocks.CRACKED_STONE_BRICKS.defaultBlockState()));
+                }
+            }
+        }
+        LOG.info("corruption_overlay player=" + p.getUUID() + " blocks=" + corruptedBlocks.size());
+    }
+    private static void clearCorruption(ServerPlayer p) {
+        for (BlockPos pos : corruptedBlocks.keySet()) {
+            if (p.level().isLoaded(pos))
+                p.connection.send(new ClientboundBlockUpdatePacket(pos, p.level().getBlockState(pos)));
+        }
+        corruptedBlocks.clear();
+    }
+    private static void npcDialogue(ServerPlayer p) {
+        fakeChat(p, "Unknown", NPC_LINES[RNG.nextInt(NPC_LINES.length)]);
+    }
+    /** An echo uses the existing experimental fake-player packet layer. It is
+     * not movement replay: real player movement capture is not implemented. */
+    private static void echoAppearance(MinecraftServer server, ServerPlayer p) {
+        List<ServerPlayer> others = server.getPlayerList().getPlayers().stream()
+            .filter(other -> !other.getUUID().equals(p.getUUID())).toList();
+        if (others.isEmpty()) { npcDialogue(p); return; }
+        ServerPlayer copy = others.get(RNG.nextInt(others.size()));
+        captureIdentity(copy);
+        IdentitySnapshot snap = identitySnapshots.get(copy.getUUID());
+        Vec3 place = p.position().add(RNG.nextInt(17)-8, 0, RNG.nextInt(17)-8);
+        GHOST.show(p, snap.playerId(), snap.playerName(), snap.textureProperty(), snap.textureSignature(),
+            place, RNG.nextFloat() * 360f);
+        LOG.info("echo_attempt player=" + p.getUUID() + " identity=" + copy.getUUID());
+    }
+
     private static void startFalseSession(ServerPlayer p, boolean forced) {
         if (!falseWorldEnabled || OPT_OUT.contains(p.getUUID())) return;
         if (FALSE_SESSIONS.containsKey(p.getUUID())) return;
         int duration = falseWorldMinSeconds + RNG.nextInt(falseWorldMaxSeconds - falseWorldMinSeconds + 1);
-        FALSE_SESSIONS.put(p.getUUID(), new FalseSession(p.getUUID(), p.level().dimension(),
+        ServerLevel target = p.getServer().getLevel(FALSE_DIMENSION);
+        if (target == null) {
+            p.sendSystemMessage(Component.literal("§cFalse World dimension missing. Check the bundled dimension JSON."));
+            LOG.warning("Cannot start False World: dimension falseworld:false_world not registered");
+            return;
+        }
+        returnLocations.put(p.getUUID(), p.position());
+        returnYaw.put(p.getUUID(), p.getYRot());
+        returnPitch.put(p.getUUID(), p.getXRot());
+        ResourceKey<Level> origin = p.level().dimension();
+        // First implementation: dimension terrain uses the same seed and noise settings.
+        // Player-built bases require a separate safe, bounded chunk-copy pipeline.
+        blackout(p);
+        if (!p.teleportTo(target, p.getX(), p.getY(), p.getZ(),
+                java.util.Set.of(), p.getYRot(), p.getXRot(), true)) {
+            returnLocations.remove(p.getUUID()); returnYaw.remove(p.getUUID()); returnPitch.remove(p.getUUID());
+            LOG.warning("False World teleport failed for " + p.getUUID());
+            return;
+        }
+        FALSE_SESSIONS.put(p.getUUID(), new FalseSession(p.getUUID(), origin,
             tick + duration * 20L, tick, tick));
         nextFalseWorldChanceTick = tick + 20L * 600;
         p.connection.send(new ClientboundSetTimePacket(18000L, 18000L, false));
+        corruptSurroundings(p, true);
+        nextEchoTick = tick + 200;
+        nextNpcDialogueTick = tick + 140;
         p.sendSystemMessage(Component.literal("§8§oThe world folds inward. Everything feels wrong."));
         playPrivateHorrorSound(p, true);
         LOG.info("false_world_enter player=" + p.getUUID() + " durationSeconds=" + duration + " forced=" + forced);
@@ -414,9 +560,21 @@ public final class FalseWorld implements ModInitializer {
     private static void tickFalseSession(ServerPlayer p) {
         FalseSession session = FALSE_SESSIONS.get(p.getUUID());
         if (session == null) return;
-        if (tick >= session.endTick || !p.level().dimension().equals(session.originDimension)) {
+        if (tick >= session.endTick || !p.level().dimension().equals(FALSE_DIMENSION)) {
             endFalseSession(p);
             return;
+        }
+        if (tick >= nextJumpScare.getOrDefault(p.getUUID(), 0L)) {
+            spawnScare(p, RNG.nextBoolean());
+            nextJumpScare.put(p.getUUID(), tick + 20L * (20 + RNG.nextInt(35)));
+        }
+        if (tick >= nextNpcDialogueTick) {
+            npcDialogue(p);
+            nextNpcDialogueTick = tick + 20L * (18 + RNG.nextInt(32));
+        }
+        if (tick >= nextEchoTick) {
+            echoAppearance(p.getServer(), p);
+            nextEchoTick = tick + 20L * (22 + RNG.nextInt(38));
         }
         if (tick >= session.nextCorruptionTick) {
             // Private visual corruption; no block writes, no effects on other players.
@@ -434,12 +592,31 @@ public final class FalseWorld implements ModInitializer {
         if (session == null) return;
         restore(p);
         illusions.clear();
+        clearCorruption(p);
+        clearScare(p);
+        ServerLevel original = p.getServer().getLevel(session.originDimension);
+        Vec3 destination = p.position(); // preserve where the victim walked in the false world
+        if (original != null && p.level().dimension().equals(FALSE_DIMENSION)) {
+            // Validate safe landing: avoid returning into solid blocks.
+            BlockPos feet = BlockPos.containing(destination);
+            if (!original.getBlockState(feet).getCollisionShape(original, feet).isEmpty()
+                || !original.getBlockState(feet.above()).getCollisionShape(original, feet.above()).isEmpty()) {
+                destination = returnLocations.getOrDefault(p.getUUID(), destination);
+            }
+            p.teleportTo(original, destination.x, destination.y, destination.z,
+                java.util.Set.of(), p.getYRot(), p.getXRot(), true);
+        }
+        returnLocations.remove(p.getUUID());
+        returnYaw.remove(p.getUUID());
+        returnPitch.remove(p.getUUID());
+        nextJumpScare.remove(p.getUUID());
+        GHOST.hide(p);
         // Clear only the two effects applied by this mod. If another mod grants
         // these effects, a future implementation should track ownership first.
         p.removeEffect(MobEffects.BLINDNESS);
         p.removeEffect(MobEffects.DARKNESS);
-        // Resync the real world time/weather/border to the player.
-        p.level().getServer().getPlayerList().sendLevelInfo(p, (ServerLevel) p.level());
+        p.connection.send(new ClientboundSetTimePacket(p.level().getGameTime(),
+            p.level().getDayTime(), p.level().getGameRules().getBoolean(net.minecraft.world.level.GameRules.RULE_DAYLIGHT)));
         p.sendSystemMessage(Component.literal("§7§oThe false world releases you."));
         LOG.info("false_world_return player=" + p.getUUID() + " position=" + p.blockPosition());
     }
@@ -459,6 +636,35 @@ public final class FalseWorld implements ModInitializer {
         p.sendSystemMessage(Component.literal("§7<" + name + "> §f" + message));
         LOG.info("fake_chat victim=" + p.getUUID() + " name=" + name);
     }
+    /** No real mob or explosive is added to the level. Only the victim sees it. */
+    private static void spawnScare(ServerPlayer p, boolean tnt) {
+        clearScare(p);
+        ServerLevel level = (ServerLevel)p.level();
+        Vec3 forward = p.getLookAngle();
+        Vec3 spawn = tnt ? p.position().add(0, 0.5, 0) :
+            p.position().add(forward.x * 2.7, 0, forward.z * 2.7);
+        if (tnt) {
+            PrimedTnt fake = new PrimedTnt(EntityType.TNT, level);
+            fake.setPos(spawn.x, spawn.y, spawn.z);
+            scareEntityId = fake.getId();
+            p.connection.send(new ClientboundAddEntityPacket(fake, 0, fake.blockPosition()));
+            scareExpiry = tick + 20; // vanish before vanilla TNT fuse finishes
+        } else {
+            Creeper fake = new Creeper(EntityType.CREEPER, level);
+            fake.setPos(spawn.x, spawn.y, spawn.z);
+            scareEntityId = fake.getId();
+            p.connection.send(new ClientboundAddEntityPacket(fake, 0, fake.blockPosition()));
+            scareExpiry = tick + 24; // vanish before any actual explosion
+        }
+        playPrivateHorrorSound(p, true);
+        LOG.info("private_scare victim=" + p.getUUID() + " type=" + (tnt ? "tnt" : "creeper"));
+    }
+    private static void clearScare(ServerPlayer p) {
+        if (scareEntityId < 0) return;
+        if (p != null) p.connection.send(new ClientboundRemoveEntitiesPacket(scareEntityId));
+        scareEntityId = -1;
+    }
+
     private static void fakeMob(ServerPlayer p) {
         clearMob(p);
         ServerLevel level = (ServerLevel)p.level();
