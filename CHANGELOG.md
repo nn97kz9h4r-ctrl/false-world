@@ -1,6 +1,5 @@
-# v0.10
-- Experimental server-only fake player packet adapter.
-- Mimic spawn/hide/chase test commands and phase overrides.
-- Ground placement and simple collision avoidance.
-- Integrated audio, illusions, and attack test commands.
-- Not compiled or tested.
+# v0.12
+- Added timed, victim-only false-world illusion sessions (60–300 seconds).
+- Added `/falseworld dimension test|return|status`.
+- Added configuration and private corruption pulses.
+- No actual cloned dimension yet; see README.

@@ -8,16 +8,33 @@ import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundSoundPacket;
-import net.minecraft.core.Holder;
-import net.minecraft.sounds.SoundEvent;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.protocol.game.ClientboundCustomSoundPacket;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
+import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
+import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.monster.EnderMan;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
+import net.minecraft.world.entity.EquipmentSlot;
+import com.mojang.datafixers.util.Pair;
+import java.nio.file.*;
+import java.io.*;
+import java.util.logging.Logger;
+import java.util.logging.FileHandler;
+import java.util.logging.SimpleFormatter;
+import java.util.Properties;
 import java.util.*;
 
 /** Server-side illusion engine. All fake blocks are packet-only, never written to the level. */
@@ -26,7 +43,30 @@ public final class FalseWorld implements ModInitializer {
     private static final HorrorDirector MIMIC = new HorrorDirector();
     private static final FakePlayerPackets GHOST = new FakePlayerPackets();
     private static boolean enabled = true;
+    private static final Properties CONFIG = new Properties();
+    private static final Set<UUID> OPT_OUT = new HashSet<>();
+    private static Path dataDir;
+    private static UUID persistedVictim;
+    private static long lastPersistenceTick;
+    private static final Logger LOG = Logger.getLogger("FalseWorld");
+    private static int mobEntityId = -1;
+    private static long mobExpiry;
+    private static int damageCap = 2;
+    private static boolean allowDamage = false;
+    private static boolean allowBlackout = true;
+    private static int blackoutSeconds = 5;
+    private static int eventMinSeconds = 45, eventMaxSeconds = 140;
+    private static int maxPhase = 4;
+    private static long lastBlackoutTick = -2400;
     private static int forcedPhase = -1;
+    // Packet-only false-world session: remains in original dimension; no world edits.
+    private static final Map<UUID, FalseSession> FALSE_SESSIONS = new HashMap<>();
+    private static boolean falseWorldEnabled = true;
+    private static int falseWorldChancePercent = 5;
+    private static int falseWorldMinSeconds = 60, falseWorldMaxSeconds = 300;
+    private static long nextFalseWorldChanceTick;
+    private record FalseSession(UUID playerId, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> originDimension,
+                                long endTick, long nextCorruptionTick, long startedTick) {}
     private static long nextGhostRefresh;
     private static UUID previousViewer;
     private static UUID victim, stolenIdentity;
@@ -59,8 +99,68 @@ public final class FalseWorld implements ModInitializer {
 
     @Override public void onInitialize() {
         ServerTickEvents.END_SERVER_TICK.register(FalseWorld::tickServer);
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTED.register(FalseWorld::loadConfigAndState);
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STOPPING.register(FalseWorld::saveState);
         CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
-            dispatcher.register(Commands.literal("falseworld").requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+            dispatcher.register(Commands.literal("falseworld").requires(s -> s.hasPermission(2))
+                .then(Commands.literal("dimension").then(Commands.literal("test").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) { c.getSource().sendFailure(Component.literal("Select an online victim first: /falseworld target <name>")); return 0; }
+                    startFalseSession(p, true);
+                    c.getSource().sendSuccess(() -> Component.literal("False-world session started for victim"), false);
+                    return 1;
+                })).then(Commands.literal("return").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null || !FALSE_SESSIONS.containsKey(p.getUUID())) { c.getSource().sendFailure(Component.literal("No active false-world session")); return 0; }
+                    endFalseSession(p);
+                    c.getSource().sendSuccess(() -> Component.literal("False-world session ended"), false);
+                    return 1;
+                })).then(Commands.literal("status").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    FalseSession session = p == null ? null : FALSE_SESSIONS.get(p.getUUID());
+                    c.getSource().sendSuccess(() -> Component.literal(session == null ? "No false-world session" :
+                        "False-world session: " + Math.max(0, (session.endTick - tick) / 20) + " seconds left"), false);
+                    return 1;
+                })))
+                .then(Commands.literal("blackouttest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    blackout(p); return 1;
+                }))
+                .then(Commands.literal("mobtest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    fakeMob(p); return 1;
+                }))
+                .then(Commands.literal("timetest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    p.connection.send(new ClientboundSetTimePacket(18000L, 18000L, false)); return 1;
+                }))
+                .then(Commands.literal("chattest").executes(c -> {
+                    ServerPlayer p = getVictim(c.getSource().getServer());
+                    if (p == null) return 0;
+                    fakeChat(p, "Someone", "Did you see that?"); return 1;
+                }))
+                .then(Commands.literal("optout").then(Commands.argument("name", StringArgumentType.word()).executes(c -> {
+                    String name = StringArgumentType.getString(c,"name");
+                    ServerPlayer p = c.getSource().getServer().getPlayerList().getPlayers().stream()
+                        .filter(x -> x.getGameProfile().name().equalsIgnoreCase(name)).findFirst().orElse(null);
+                    if (p == null) return 0;
+                    OPT_OUT.add(p.getUUID());
+                    if (p.getUUID().equals(victim)) reset(c.getSource().getServer());
+                    saveState(c.getSource().getServer()); return 1;
+                })))
+                .then(Commands.literal("optin").then(Commands.argument("name", StringArgumentType.word()).executes(c -> {
+                    String name = StringArgumentType.getString(c,"name");
+                    ServerPlayer p = c.getSource().getServer().getPlayerList().getPlayers().stream()
+                        .filter(x -> x.getGameProfile().name().equalsIgnoreCase(name)).findFirst().orElse(null);
+                    if (p == null) return 0;
+                    OPT_OUT.remove(p.getUUID()); saveState(c.getSource().getServer()); return 1;
+                })))
+                .then(Commands.literal("reloadconfig").executes(c -> {
+                    loadConfigAndState(c.getSource().getServer()); return 1;
+                }))
                 .then(Commands.literal("status").executes(c -> {
                     c.getSource().sendSuccess(() -> Component.literal("Victim=" + victim + "; copied=" + stolenIdentity + "; events=" + events + "; phase=" + phase() + "; mimic=" + MIMIC.snapshot().mode() + "; ghostVisible=" + GHOST.visible() + "; enabled=" + enabled), false);
                     return 1;
@@ -98,7 +198,7 @@ public final class FalseWorld implements ModInitializer {
                 }))
                 .then(Commands.literal("attacktest").executes(c -> {
                     ServerPlayer p = getVictim(c.getSource().getServer());
-                    if (p == null) return 0; p.hurt(p.damageSources().magic(), 2.0f); return 1;
+                    if (p == null) return 0; if (allowDamage && damageCap > 0) p.hurt(p.damageSources().magic(), damageCap); return 1;
                 }))
                 .then(Commands.literal("reset").executes(c -> {
                     reset(c.getSource().getServer());
@@ -109,7 +209,7 @@ public final class FalseWorld implements ModInitializer {
                     String name = StringArgumentType.getString(c, "name");
                     ServerPlayer p = c.getSource().getServer().getPlayerList().getPlayers().stream()
                         .filter(x -> x.getGameProfile().name().equalsIgnoreCase(name)).findFirst().orElse(null);
-                    if (p == null) { c.getSource().sendFailure(Component.literal("Player not online")); return 0; }
+                    if (p == null || OPT_OUT.contains(p.getUUID())) { c.getSource().sendFailure(Component.literal("Player offline or opted out")); return 0; }
                     reset(c.getSource().getServer());
                     victim = p.getUUID(); nextEvent = tick + 20 * 15;
                     c.getSource().sendSuccess(() -> Component.literal("Secret target selected."), true);
@@ -139,14 +239,15 @@ public final class FalseWorld implements ModInitializer {
                 }))));
     }
 
-    private static int phase() { return forcedPhase >= 0 ? forcedPhase : Math.min(4, events / 3); }
+    private static int phase() { return Math.min(maxPhase, forcedPhase >= 0 ? forcedPhase : Math.min(4, events / 3)); }
     private static ServerPlayer getVictim(MinecraftServer server) {
         return server.getPlayerList().getPlayers().stream().filter(p -> p.getUUID().equals(victim)).findFirst().orElse(null);
     }
     private static void reset(MinecraftServer server) {
         ServerPlayer p = getVictim(server);
-        if (p != null) restore(p);
+        if (p != null) { endFalseSession(p); restore(p); }
         GHOST.hide(p);
+        if (p != null) { p.removeEffect(MobEffects.BLINDNESS); p.removeEffect(MobEffects.DARKNESS); clearMob(p); }
         MIMIC.reset(); forcedPhase = -1; nextGhostRefresh = 0; illusions.clear(); identitySnapshots.clear(); lastStolenIdentity = null; victim = null; stolenIdentity = null; events = 0; lastSoundTick = -SOUND_COOLDOWN_TICKS;
         nextEvent = tick + 20 * 60;
     }
@@ -159,6 +260,11 @@ public final class FalseWorld implements ModInitializer {
         tick++;
         ServerPlayer p = getVictim(server);
         if (!enabled) return;
+        if (p != null) tickFalseSession(p);
+        if (p == null && victim != null) FALSE_SESSIONS.remove(victim);
+        if (persistedVictim != null && victim == null) { victim = persistedVictim; persistedVictim = null; }
+        if (tick - lastPersistenceTick > 1200) { saveState(server); lastPersistenceTick = tick; }
+        if (p != null && mobEntityId >= 0 && tick >= mobExpiry) clearMob(p);
         if (p == null && GHOST.visible()) { GHOST.hide(null); MIMIC.reset(); }
         if (p != null && MIMIC.active() && stolenIdentity != null && tick >= nextGhostRefresh) {
             IdentitySnapshot snap = identitySnapshots.get(stolenIdentity);
@@ -182,20 +288,20 @@ public final class FalseWorld implements ModInitializer {
         if (p != null && MIMIC.active()) {
             if (MIMIC.tick(p, phase())) {
                 // A server-authoritative attack. No phantom entity hitboxes needed.
-                p.hurt(p.damageSources().magic(), 2.0f);
+                if (allowDamage && damageCap > 0) p.hurt(p.damageSources().magic(), damageCap);
                 playPrivateHorrorSound(p, true);
             }
         }
         if (tick < nextEvent) return;
-        nextEvent = tick + 20L * (45 + RNG.nextInt(100));
-        List<ServerPlayer> online = server.getPlayerList().getPlayers();
+        nextEvent = tick + 20L * (eventMinSeconds + RNG.nextInt(Math.max(1, eventMaxSeconds - eventMinSeconds + 1)));
+        List<ServerPlayer> online = server.getPlayerList().getPlayers().stream().filter(x -> !OPT_OUT.contains(x.getUUID())).toList();
         if (online.size() < 2) return;
         if (p == null) {
             // When a target disconnects, restore their old client state on rejoin via chunk reload.
             illusions.clear(); victim = online.get(RNG.nextInt(online.size())).getUUID();
             stolenIdentity = null; events = 0; p = getVictim(server);
         }
-        if (p != null) encounter(server, p);
+        if (p != null && !OPT_OUT.contains(p.getUUID()) && !FALSE_SESSIONS.containsKey(p.getUUID())) encounter(server, p);
     }
     /**
      * Preserve the selected player's Mojang-signed skin payload, if present.
@@ -226,12 +332,21 @@ public final class FalseWorld implements ModInitializer {
         captureIdentity(copy);
         if (phase() >= 1) { MIMIC.begin(p, copy.getUUID(), phase()); nextGhostRefresh = 0; }
         events++;
+        if (falseWorldEnabled && phase() >= 3 && !FALSE_SESSIONS.containsKey(p.getUUID())
+            && tick >= nextFalseWorldChanceTick && RNG.nextInt(100) < falseWorldChancePercent) {
+            startFalseSession(p, false);
+            return;
+        }
         int stage = phase();
-        int choice = RNG.nextInt(stage >= 2 ? 7 : 4);
+        int choice = RNG.nextInt(stage >= 2 ? 11 : 5);
         if (choice == 0) p.sendSystemMessage(Component.literal(EARLY[RNG.nextInt(EARLY.length)]));
         else if (choice == 1) p.sendSystemMessage(Component.literal("§8Was that §f" + copy.getGameProfile().name() + "§8?"));
         else if (choice == 2) p.sendSystemMessage(Component.literal(stage >= 3 ? LATE[RNG.nextInt(LATE.length)] : EARLY[RNG.nextInt(EARLY.length)]));
         else if (choice == 3) { createIllusion(p); playPrivateHorrorSound(p, false); }
+        else if (choice == 7) blackout(p);
+        else if (choice == 8) fakeMob(p);
+        else if (choice == 9) fakeChat(p, copy.getGameProfile().name(), "I'm right behind you.");
+        else if (choice == 10) p.connection.send(new ClientboundSetTimePacket(18000L, 18000L, false));
         else { playPrivateHorrorSound(p, false);
             p.sendSystemMessage(Component.literal("§8You remember " + copy.getGameProfile().name() + " being somewhere else.")); }
     }
@@ -249,10 +364,9 @@ public final class FalseWorld implements ModInitializer {
         double y = p.getY() + RNG.nextInt(5) - 2;
         double z = p.getZ() + Math.sin(angle) * distance;
         String soundId = SOUND_IDS[RNG.nextInt(SOUND_IDS.length)];
-        p.connection.send(new ClientboundSoundPacket(
-            Holder.direct(SoundEvent.createVariableRangeEvent(Identifier.parse(soundId))),
-            SoundSource.AMBIENT,
-            x, y, z,
+        p.connection.send(new ClientboundCustomSoundPacket(
+            ResourceLocation.parse(soundId), SoundSource.AMBIENT,
+            new Vec3(x, y, z),
             0.65f + RNG.nextFloat() * 0.35f,
             0.75f + RNG.nextFloat() * 0.35f,
             RNG.nextLong()
@@ -275,4 +389,145 @@ public final class FalseWorld implements ModInitializer {
         }
         p.sendSystemMessage(Component.literal("§8For an instant, the walls seem unfamiliar."));
     }
+
+    /**
+     * False World overlay: private time/block/sound packets while player continues
+     * walking in the real world. Exact-position return is automatic because no
+     * teleport happens. This is NOT a separately registered Minecraft dimension.
+     */
+    private static void startFalseSession(ServerPlayer p, boolean forced) {
+        if (!falseWorldEnabled || OPT_OUT.contains(p.getUUID())) return;
+        if (FALSE_SESSIONS.containsKey(p.getUUID())) return;
+        int duration = falseWorldMinSeconds + RNG.nextInt(falseWorldMaxSeconds - falseWorldMinSeconds + 1);
+        FALSE_SESSIONS.put(p.getUUID(), new FalseSession(p.getUUID(), p.level().dimension(),
+            tick + duration * 20L, tick, tick));
+        nextFalseWorldChanceTick = tick + 20L * 600;
+        p.connection.send(new ClientboundSetTimePacket(18000L, 18000L, false));
+        p.sendSystemMessage(Component.literal("§8§oThe world folds inward. Everything feels wrong."));
+        playPrivateHorrorSound(p, true);
+        LOG.info("false_world_enter player=" + p.getUUID() + " durationSeconds=" + duration + " forced=" + forced);
+    }
+
+    private static void tickFalseSession(ServerPlayer p) {
+        FalseSession session = FALSE_SESSIONS.get(p.getUUID());
+        if (session == null) return;
+        if (tick >= session.endTick || !p.level().dimension().equals(session.originDimension)) {
+            endFalseSession(p);
+            return;
+        }
+        if (tick >= session.nextCorruptionTick) {
+            // Private visual corruption; no block writes, no effects on other players.
+            p.connection.send(new ClientboundSetTimePacket(18000L, 18000L, false));
+            createIllusion(p);
+            if (RNG.nextInt(3) == 0) playPrivateHorrorSound(p, true);
+            if (RNG.nextInt(5) == 0) blackout(p);
+            FALSE_SESSIONS.put(p.getUUID(), new FalseSession(session.playerId,
+                session.originDimension, session.endTick, tick + 20L * (4 + RNG.nextInt(5)), session.startedTick));
+        }
+    }
+
+    private static void endFalseSession(ServerPlayer p) {
+        FalseSession session = FALSE_SESSIONS.remove(p.getUUID());
+        if (session == null) return;
+        restore(p);
+        illusions.clear();
+        // Clear only the two effects applied by this mod. If another mod grants
+        // these effects, a future implementation should track ownership first.
+        p.removeEffect(MobEffects.BLINDNESS);
+        p.removeEffect(MobEffects.DARKNESS);
+        p.connection.send(new ClientboundSetTimePacket(p.level().getGameTime(),
+            p.level().getDayTime(), p.level().getGameRules().getBoolean(net.minecraft.world.level.GameRules.RULE_DAYLIGHT)));
+        p.sendSystemMessage(Component.literal("§7§oThe false world releases you."));
+        LOG.info("false_world_return player=" + p.getUUID() + " position=" + p.blockPosition());
+    }
+
+    /** Screen obscuring uses server-issued vanilla blindness and darkness effects.
+     * This is intentionally NOT claimed to be a packet-only visual overlay. */
+    private static void blackout(ServerPlayer p) {
+        if (!allowBlackout || tick - lastBlackoutTick < 20 * 30) return;
+        lastBlackoutTick = tick;
+        int duration = Math.max(1, Math.min(12, blackoutSeconds)) * 20;
+        p.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, duration, 0, false, false, false));
+        p.addEffect(new MobEffectInstance(MobEffects.DARKNESS, duration, 0, false, false, false));
+        LOG.info("blackout victim=" + p.getUUID() + " ticks=" + duration);
+    }
+    /** System messages are deliberately marked as SYSTEM, not forged signed chat. */
+    private static void fakeChat(ServerPlayer p, String name, String message) {
+        p.sendSystemMessage(Component.literal("§7<" + name + "> §f" + message));
+        LOG.info("fake_chat victim=" + p.getUUID() + " name=" + name);
+    }
+    private static void fakeMob(ServerPlayer p) {
+        clearMob(p);
+        ServerLevel level = (ServerLevel)p.level();
+        var mob = RNG.nextBoolean() ? new Creeper(EntityType.CREEPER, level) : new EnderMan(EntityType.ENDERMAN, level);
+        Vec3 pos = p.position().add(RNG.nextInt(19)-9, 0, RNG.nextInt(19)-9);
+        mob.setPos(pos.x, pos.y, pos.z);
+        mobEntityId = mob.getId();
+        p.connection.send(new ClientboundAddEntityPacket(mob, 0, mob.blockPosition()));
+        mobExpiry = tick + 20 * 5;
+        LOG.info("fake_mob victim=" + p.getUUID() + " entity=" + mobEntityId);
+    }
+    private static void clearMob(ServerPlayer p) {
+        if (mobEntityId < 0) return;
+        p.connection.send(new ClientboundRemoveEntitiesPacket(mobEntityId));
+        mobEntityId = -1;
+    }
+    private static void loadConfigAndState(MinecraftServer server) {
+        try {
+            dataDir = server.getServerDirectory().resolve("config").resolve("falseworld");
+            Files.createDirectories(dataDir);
+            Path cfg = dataDir.resolve("falseworld.properties");
+            CONFIG.clear();
+            if (Files.exists(cfg)) try (var in = Files.newInputStream(cfg)) { CONFIG.load(in); }
+            CONFIG.putIfAbsent("damage.enabled", "false");
+            CONFIG.putIfAbsent("damage.max", "2");
+            CONFIG.putIfAbsent("blackout.enabled", "true");
+            CONFIG.putIfAbsent("blackout.seconds", "5");
+            CONFIG.putIfAbsent("event.min_seconds", "45");
+            CONFIG.putIfAbsent("event.max_seconds", "140");
+            CONFIG.putIfAbsent("phase.max", "4");
+            CONFIG.putIfAbsent("false_world.enabled", "true");
+            CONFIG.putIfAbsent("false_world.chance_percent", "5");
+            CONFIG.putIfAbsent("false_world.min_seconds", "60");
+            CONFIG.putIfAbsent("false_world.max_seconds", "300");
+            try (var out = Files.newOutputStream(cfg)) { CONFIG.store(out, "The False World settings"); }
+            allowDamage = Boolean.parseBoolean(CONFIG.getProperty("damage.enabled"));
+            damageCap = Math.max(0, Math.min(8, Integer.parseInt(CONFIG.getProperty("damage.max"))));
+            allowBlackout = Boolean.parseBoolean(CONFIG.getProperty("blackout.enabled"));
+            blackoutSeconds = Math.max(1, Math.min(12, Integer.parseInt(CONFIG.getProperty("blackout.seconds"))));
+            eventMinSeconds = Math.max(10, Integer.parseInt(CONFIG.getProperty("event.min_seconds")));
+            eventMaxSeconds = Math.max(eventMinSeconds, Integer.parseInt(CONFIG.getProperty("event.max_seconds")));
+            maxPhase = Math.max(0, Math.min(4, Integer.parseInt(CONFIG.getProperty("phase.max"))));
+            falseWorldEnabled = Boolean.parseBoolean(CONFIG.getProperty("false_world.enabled"));
+            falseWorldChancePercent = Math.max(0, Math.min(100, Integer.parseInt(CONFIG.getProperty("false_world.chance_percent"))));
+            falseWorldMinSeconds = Math.max(60, Math.min(300, Integer.parseInt(CONFIG.getProperty("false_world.min_seconds"))));
+            falseWorldMaxSeconds = Math.max(falseWorldMinSeconds, Math.min(300, Integer.parseInt(CONFIG.getProperty("false_world.max_seconds"))));
+            Path stateFile = dataDir.resolve("state.properties");
+            if (Files.exists(stateFile)) {
+                Properties state = new Properties();
+                try (var in = Files.newInputStream(stateFile)) { state.load(in); }
+                String target = state.getProperty("victim", "");
+                if (!target.isEmpty()) persistedVictim = UUID.fromString(target);
+                events = Integer.parseInt(state.getProperty("events", "0"));
+                OPT_OUT.clear();
+                for (String item : state.getProperty("optouts", "").split(","))
+                    if (!item.isBlank()) OPT_OUT.add(UUID.fromString(item));
+            }
+            LOG.info("False World configuration loaded");
+        } catch (Exception e) { LOG.warning("False World config/state error: " + e); }
+    }
+    private static void saveState(MinecraftServer server) {
+        if (dataDir == null) return;
+        try {
+            Properties state = new Properties();
+            UUID target = victim != null ? victim : persistedVictim;
+            state.setProperty("victim", target == null ? "" : target.toString());
+            state.setProperty("events", Integer.toString(events));
+            state.setProperty("optouts", String.join(",", OPT_OUT.stream().map(UUID::toString).toList()));
+            Path temp = dataDir.resolve("state.tmp");
+            try (var out = Files.newOutputStream(temp)) { state.store(out, "False World save state"); }
+            Files.move(temp, dataDir.resolve("state.properties"), StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception e) { LOG.warning("False World state save failed: " + e); }
+    }
+
 }

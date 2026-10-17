@@ -1,38 +1,29 @@
-# The False World v0.10 — server-side integrated TEST BUILD SOURCE
+# The False World v0.12 — false-world session prototype
 
-**IMPORTANT: UNCOMPILED, UNTESTED. This is NOT a working JAR.**
+**UNCOMPILED AND UNTESTED SOURCE. NOT A SERVER-READY JAR.**
 
-Minecraft 1.21.11, Fabric, JDK 21. **Server-side only** (`fabric.mod.json` environment server). Vanilla clients need no mod.
+## New
+- At horror phase 3+, an encounter has a configurable probability of starting a
+  private **false-world illusion session**.
+- Session duration is randomly 60–300 seconds (1–5 minutes).
+- The player continues moving in the *real* world, with victim-only nighttime,
+  temporary fake blocks, sounds and occasional Darkness/Blindness.
+- At expiry, private block illusions are restored and time is resynchronized.
+- The player is **already at the exact same world coordinates** they reached
+  during the session, because no teleport occurred.
+- OP commands: `/falseworld target <name>`, `/falseworld dimension test`,
+  `/falseworld dimension return`, `/falseworld dimension status`.
+- Config: `false_world.enabled`, `false_world.chance_percent`,
+  `false_world.min_seconds`, `false_world.max_seconds`.
+- Automatic session cancellation on world change and disconnect.
 
-## Implemented in source
-- Victim-only fake player packet *attempt* (player-info and spawn packets) with captured skin GameProfile.
-- Mimic observation/stalking/chase state machine, limited horizontal collision avoidance and ground placement.
-- Victim-only positional sound and packet-based temporary block hallucinations.
-- Attack damage, phase escalation, admin test commands.
+## Important limitations
+This is NOT a new Minecraft dimension or an independent physical copy of the
+world. A true cloned dimension requires a dimension definition, terrain/chunk
+copying, player teleportation, entity/block updates and persistent state, which
+this implementation does not provide. Other players still exist in the same
+physical world; packet-only illusions cannot fully isolate their interactions.
+The 1.21.11 mappings, packet constructors and build remain unverified.
+The existing Mimic packet implementation also remains experimental.
 
-## Test commands (operator, permission level 2)
-- `/falseworld target <player>` — select victim
-- `/falseworld mimic spawn` — request fake player impersonating another ONLINE player
-- `/falseworld mimic hide` — remove the fake player
-- `/falseworld mimic chase` — force maximum phase
-- `/falseworld phase <0..4>` — force phase
-- `/falseworld trigger` — force a random horror encounter
-- `/falseworld illusiontest` — create a temporary client-only fake block
-- `/falseworld soundtest` — private positional sound
-- `/falseworld attacktest` — deal 1 heart of magic damage to victim
-- `/falseworld disguiseinfo` — show captured identity metadata
-- `/falseworld status` — internal status
-- `/falseworld reset` — restore blocks and clear session
-- `/falseworld disable` / `enable` — switch encounters off/on
-
-## Known serious limitations
-- This has NOT been compiled against the Minecraft 1.21.11 mappings. Packet constructors, fake player metadata and skin resolution may require significant fixes.
-- Fake player movement currently uses remove-and-respawn packet refresh every five ticks: **visually jarring**, not smooth movement.
-- No true A* pathfinding; the actor only tries direct movement and lateral obstacle avoidance.
-- No crouching/walking animations or fake-player equipment packets yet.
-- Actor identity may collide with a real online player profile; real vanilla player-list semantics require testing.
-- Attacks are server-applied independent of client rendering; do not test on a live survival server.
-- No world-save persistence; disconnected victim illusion cleanup is best-effort.
-
-## Build
-Requires Gradle and online Fabric/Minecraft dependencies. `gradle build` from project root. Only install a successfully compiled remapped JAR after testing on a disposable server.
+Do not install the source ZIP into your server's `mods` folder.

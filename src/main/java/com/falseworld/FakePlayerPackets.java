@@ -5,6 +5,10 @@ import com.mojang.authlib.properties.Property;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
+import net.minecraft.world.entity.EquipmentSlot;
+import com.mojang.datafixers.util.Pair;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -50,7 +54,7 @@ public final class FakePlayerPackets {
                 profile.properties().put("textures", new Property("textures", skin,
                     skinSignature == null || skinSignature.isEmpty() ? null : skinSignature));
             }
-            MinecraftServer server = ((ServerLevel) viewer.level()).getServer();
+            MinecraftServer server = viewer.getServer();
             actor = new ServerPlayer(server, (ServerLevel) viewer.level(), profile,
                 ClientInformation.createDefault());
             entityId = actor.getId();
@@ -58,12 +62,21 @@ public final class FakePlayerPackets {
             viewer.connection.send(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(actor)));
         }
         if (visible && shownAt != null && shownAt.distanceToSqr(pos) < 0.12) return;
-        if (visible) viewer.connection.send(new ClientboundRemoveEntitiesPacket(entityId));
+        if (visible) {
+            actor.setPos(pos.x, pos.y, pos.z);
+            actor.setYRot(yaw);
+            actor.setYHeadRot(yaw);
+            viewer.connection.send(new ClientboundTeleportEntityPacket(actor));
+            shownAt = pos;
+            return;
+        }
         actor.setPos(pos.x, pos.y, pos.z);
         actor.setYRot(yaw);
         actor.setYHeadRot(yaw);
         actor.setYBodyRot(yaw);
         viewer.connection.send(new ClientboundAddEntityPacket(actor, 0, actor.blockPosition()));
+        // The fake's equipment must be copied separately from the real player
+        // (requires a reference to the impersonated player at the call site).
         shownAt = pos;
         visible = true;
     }
