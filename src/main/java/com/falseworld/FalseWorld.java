@@ -8,8 +8,10 @@ import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundCustomSoundPacket;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
+import net.minecraft.core.Holder;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.server.MinecraftServer;
@@ -102,7 +104,7 @@ public final class FalseWorld implements ModInitializer {
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTED.register(FalseWorld::loadConfigAndState);
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STOPPING.register(FalseWorld::saveState);
         CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
-            dispatcher.register(Commands.literal("falseworld").requires(s -> s.hasPermission(2))
+            dispatcher.register(Commands.literal("falseworld").requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
                 .then(Commands.literal("dimension").then(Commands.literal("test").executes(c -> {
                     ServerPlayer p = getVictim(c.getSource().getServer());
                     if (p == null) { c.getSource().sendFailure(Component.literal("Select an online victim first: /falseworld target <name>")); return 0; }
@@ -364,9 +366,10 @@ public final class FalseWorld implements ModInitializer {
         double y = p.getY() + RNG.nextInt(5) - 2;
         double z = p.getZ() + Math.sin(angle) * distance;
         String soundId = SOUND_IDS[RNG.nextInt(SOUND_IDS.length)];
-        p.connection.send(new ClientboundCustomSoundPacket(
-            ResourceLocation.parse(soundId), SoundSource.AMBIENT,
-            new Vec3(x, y, z),
+        p.connection.send(new ClientboundSoundPacket(
+            Holder.direct(SoundEvent.createVariableRangeEvent(Identifier.parse(soundId))),
+            SoundSource.AMBIENT,
+            x, y, z,
             0.65f + RNG.nextFloat() * 0.35f,
             0.75f + RNG.nextFloat() * 0.35f,
             RNG.nextLong()
@@ -435,8 +438,8 @@ public final class FalseWorld implements ModInitializer {
         // these effects, a future implementation should track ownership first.
         p.removeEffect(MobEffects.BLINDNESS);
         p.removeEffect(MobEffects.DARKNESS);
-        p.connection.send(new ClientboundSetTimePacket(p.level().getGameTime(),
-            p.level().getDayTime(), p.level().getGameRules().getBoolean(net.minecraft.world.level.GameRules.RULE_DAYLIGHT)));
+        // Resync the real world time/weather/border to the player.
+        p.level().getServer().getPlayerList().sendLevelInfo(p, (ServerLevel) p.level());
         p.sendSystemMessage(Component.literal("§7§oThe false world releases you."));
         LOG.info("false_world_return player=" + p.getUUID() + " position=" + p.blockPosition());
     }
