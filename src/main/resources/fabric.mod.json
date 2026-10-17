@@ -1,0 +1,10 @@
+{
+ "schemaVersion": 1,
+ "id": "falseworld",
+ "version": "${version}",
+ "name": "The False World",
+ "description": "Early multiplayer psychological horror prototype: one secretly chosen victim.",
+ "environment": "server",
+ "entrypoints": {"main": ["com.falseworld.FalseWorld"]},
+ "depends": {"fabricloader": ">=0.18.0", "minecraft": "1.21.11", "java": ">=21", "fabric-api": "*"}
+}
