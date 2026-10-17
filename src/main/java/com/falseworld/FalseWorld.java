@@ -8,8 +8,10 @@ import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundCustomSoundPacket;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
+import net.minecraft.core.Holder;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.server.MinecraftServer;
@@ -58,7 +60,7 @@ public final class FalseWorld implements ModInitializer {
     @Override public void onInitialize() {
         ServerTickEvents.END_SERVER_TICK.register(FalseWorld::tickServer);
         CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
-            dispatcher.register(Commands.literal("falseworld").requires(s -> s.hasPermission(2))
+            dispatcher.register(Commands.literal("falseworld").requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
                 .then(Commands.literal("status").executes(c -> {
                     c.getSource().sendSuccess(() -> Component.literal("Victim=" + victim + "; copied=" + stolenIdentity + "; events=" + events + "; phase=" + phase() + "; mimic=" + MIMIC.snapshot().mode() + "; ghostVisible=" + GHOST.visible() + "; enabled=" + enabled), false);
                     return 1;
@@ -247,9 +249,10 @@ public final class FalseWorld implements ModInitializer {
         double y = p.getY() + RNG.nextInt(5) - 2;
         double z = p.getZ() + Math.sin(angle) * distance;
         String soundId = SOUND_IDS[RNG.nextInt(SOUND_IDS.length)];
-        p.connection.send(new ClientboundCustomSoundPacket(
-            ResourceLocation.parse(soundId), SoundSource.AMBIENT,
-            new Vec3(x, y, z),
+        p.connection.send(new ClientboundSoundPacket(
+            Holder.direct(SoundEvent.createVariableRangeEvent(Identifier.parse(soundId))),
+            SoundSource.AMBIENT,
+            x, y, z,
             0.65f + RNG.nextFloat() * 0.35f,
             0.75f + RNG.nextFloat() * 0.35f,
             RNG.nextLong()

@@ -50,7 +50,7 @@ public final class FakePlayerPackets {
                 profile.properties().put("textures", new Property("textures", skin,
                     skinSignature == null || skinSignature.isEmpty() ? null : skinSignature));
             }
-            MinecraftServer server = viewer.getServer();
+            MinecraftServer server = ((ServerLevel) viewer.level()).getServer();
             actor = new ServerPlayer(server, (ServerLevel) viewer.level(), profile,
                 ClientInformation.createDefault());
             entityId = actor.getId();
