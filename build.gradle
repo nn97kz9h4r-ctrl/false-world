@@ -1,5 +1,5 @@
 plugins { id 'fabric-loom' version '1.13-SNAPSHOT' }
-version = '0.15.0'
+version = '0.16.0'
 group = 'com.falseworld'
 base { archivesName = 'false-world' }
 repositories { mavenCentral(); maven { url = 'https://maven.fabricmc.net/' } }

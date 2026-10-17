@@ -1,5 +1,5 @@
-# v0.15
-- Flat worldgen configuration for falseworld:false_world
-- Physical leafless trees and ruined chapel in false dimension
-- Arrival/return elevation adjustment
-- Not compiled or tested
+# v0.16
+- Dynamic safe landing platform and cleared airspace
+- Ruined buildings physically placed near entry
+- Flat dimension worldgen + scene/ground test commands
+- Corrected false-success reporting
